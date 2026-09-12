@@ -39,29 +39,37 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
-    - name: Deploy to Private EC2 via Bastion Jump
+    - name: Configure AWS Credentials for Runner
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::904233134125:role/github-actions-ecr-role
+        aws-region: ap-northeast-2
+
+    - name: Deploy Image to Private EC2 via Bastion Tunnel
       uses: appleboy/ssh-action@v1.0.3
       with:
-        host: ${{ secrets.APP_PRIVATE_IP }}
+        host: ${{ secrets.BASTION_HOST }}
         username: ubuntu
         key: ${{ secrets.EC2_SSH_KEY }}
-        proxy_host: ${{ secrets.BASTION_HOST }}
-        proxy_username: ubuntu
-        proxy_key: ${{ secrets.EC2_SSH_KEY }}
         script: |
-          # 1. AWS 자격 증명 환경에서 ECR 토큰 발급 및 Docker 로그인
+          # 1. 인터넷이 되는 Bastion에서 ECR 로그인 및 이미지 다운로드
           aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin ${{ secrets.ECR_REPO_URI }}
-          
-          # 2. 최신 컨테이너 이미지 Pull
           docker pull ${{ secrets.ECR_REPO_URI }}:latest
           
-          # 3. 기존 컨테이너 안전 종료 및 제거
-          docker stop my-fastapi-app || true
-          docker rm my-fastapi-app || true
+          # 2. 이미지를 tar 파일로 저장
+          docker save ${{ secrets.ECR_REPO_URI }}:latest -o /tmp/app-latest.tar
           
-          # 4. 새 도커 컨테이너 백그라운드 구동 (--restart always 자가 치유)
-          docker run -d -p 8000:8000 --name my-fastapi-app --restart always ${{ secrets.ECR_REPO_URI }}:latest
+          # 3. 내부 사설망을 통해 Private EC2로 전송 및 컨테이너 교체
+          scp -o StrictHostKeyChecking=no /tmp/app-latest.tar ubuntu@${{ secrets.APP_PRIVATE_IP }}:/tmp/
           
-          # 5. 내부 헬스체크 검증
-          sleep 3
-          curl -f http://localhost:8000/health
+          ssh -o StrictHostKeyChecking=no ubuntu@${{ secrets.APP_PRIVATE_IP }} << 'EOF'
+            docker load -i /tmp/app-latest.tar
+            docker stop my-fastapi-app || true
+            docker rm my-fastapi-app || true
+            docker run -d -p 8000:8000 --name my-fastapi-app --restart always ${{ secrets.ECR_REPO_URI }}:latest
+            sleep 3
+            curl -f http://localhost:8000/health
+          EOF
+          
+          # 임시 파일 정리
+          rm -f /tmp/app-latest.tar
