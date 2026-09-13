@@ -84,7 +84,7 @@ FastAPI 백엔드 서비스를 AWS 환경에 배포하면서 다음과 같은 �
 
 ### 4.1 Public / Private 네트워크 분리
 
-VPC를 직접 생성하고 2개의 Availability Zone에 Public 및 Private Subnet을 구성했습니다.
+VPC를 생성하고 2개의 Availability Zone에 Public 및 Private Subnet을 구성했습니다.
 
 인터넷과 통신이 필요한 리소스와 외부에서 직접 접근할 필요가 없는 리소스를 분리하여 네트워크 접근 범위를 제한했습니다.
 
@@ -399,23 +399,13 @@ OIDC를 사용하면 GitHub Actions가 실행될 때만 임시 자격 증명을 
 ```text
 ├── .github/
 │   └── workflows/
-│       └── deploy.yaml
-│           └── OIDC 기반 ECR 이미지 빌드 및 Push CI
-│
-├── app/
-│   ├── main.py
-│   │   └── FastAPI 애플리케이션 엔드포인트 (/health)
-│   ├── requirements.txt
-│   │   └── Python 의존성 패키지
-│   └── Dockerfile
-│       └── FastAPI 실행 환경 및 이미지 설정
-│
+│       └── deploy.yaml         # OIDC 기반 ECR 이미지 자동 빌드/푸시 CI 파이프라인
 ├── terraform/
-│   └── main.tf
-│       └── VPC, IGW, Subnet 등 인프라 리소스 정의
-│
-└── README.md
-    └── 프로젝트 아키텍처 및 구축 과정 문서
+│   └── main.tf                 # VPC, IGW, 서브넷 프로비저닝 HCL 코드
+├── main.py                     # FastAPI 애플리케이션 (/health)
+├── requirements.txt            # Python 의존성 패키지 명세
+├── Dockerfile                  # python:3.11-slim 기반 컨테이너 규격서
+└── README.md                   # 프로젝트 아키텍처 및 트러블슈팅 문서
 ```
 
 
