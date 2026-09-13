@@ -28,7 +28,7 @@ FastAPI 백엔드 서비스를 AWS 환경에 배포하면서 다음과 같은 �
 ## 2. 아키텍처
 <img width="1024" height="559" alt="image" src="https://github.com/user-attachments/assets/bc797dcf-2f7c-44a0-81a5-a72548f03ada" />
 
-```
+
 
 ### 네트워크 구성
 
@@ -316,25 +316,25 @@ Resources Removed
 
 ## 6. 트러블슈팅 및 장애 복구 (Troubleshooting)
 * [Issue 1] ALB 대상 그룹 502 Bad Gateway 및 Unhealthy 해결
-현상: ALB 엔드포인트 호출 시 브라우저에서 502 Bad Gateway가 반환되고 대상 그룹 헬스체크가 지속적으로 Unhealthy로 표시됨.
+  * 현상: ALB 엔드포인트 호출 시 브라우저에서 502 Bad Gateway가 반환되고 대상 그룹 헬스체크가 지속적으로 Unhealthy로 표시됨.
 
-원인: 백엔드 프로세스가 루프백 인터페이스(127.0.0.1:8000)로 바인딩되어 외부 가상 네트워크 카드(eth0)를 통해 들어오는 ALB 트래픽을 거부함.
+  * 원인: 백엔드 프로세스가 루프백 인터페이스(127.0.0.1:8000)로 바인딩되어 외부 가상 네트워크 카드(eth0)를 통해 들어오는 ALB 트래픽을 거부함.
 
-조치: 실행 호스트 주소를 모든 네트워크 인터페이스 수신을 뜻하는 0.0.0.0:8000으로 변경 후 재기동하여 Healthy 전환 및 정상 200 OK 복구 완료.
+  * 조치: 실행 호스트 주소를 모든 네트워크 인터페이스 수신을 뜻하는 0.0.0.0:8000으로 변경 후 재기동하여 Healthy 전환 및 정상 200 OK 복구 완료.
 
 * [Issue 2] Private Subnet 내부 패키지 타임아웃 대응 (FinOps)
-현상: Private EC2 내부에서 apt update 실행 시 101: Network is unreachable 및 연결 타임아웃 발생.
+  * 현상: Private EC2 내부에서 apt update 실행 시 101: Network is unreachable 및 연결 타임아웃 발생.
 
-원인: 격리망 특성상 외부 인터넷으로 나가는 라우팅 경로 부재.
+  * 원인: 격리망 특성상 외부 인터넷으로 나가는 라우팅 경로 부재.
 
-조치: 고정비가 큰 NAT Gateway를 증설하는 대신, Bastion Host에서 아티팩트를 패키징하여 사설 SCP로 반입하는 오프라인 아티팩트 배포 방식을 적용하여 $0 비용으로 격리 배포 완료.
+  * 조치: 고정비가 큰 NAT Gateway를 증설하는 대신, Bastion Host에서 아티팩트를 패키징하여 사설 SCP로 반입하는 오프라인 아티팩트 배포 방식을 적용하여 $0 비용으로 격리 배포 완료.
 
 * [Issue 3] ECR 이미지 덮어쓰기 차단 오류
-현상: GitHub Actions 워크플로우 실행 중 The image tag 'latest' already exists and cannot be overwritten 에러로 파이프라인 중단.
+  * 현상: GitHub Actions 워크플로우 실행 중 The image tag 'latest' already exists and cannot be overwritten 에러로 파이프라인 중단.
 
-원인: ECR 리포지토리의 기본 옵션인 Tag Immutability(태그 불변성) 설정으로 동일 태그 덮어쓰기가 AWS 정책상 차단됨.
+  * 원인: ECR 리포지토리의 기본 옵션인 Tag Immutability(태그 불변성) 설정으로 동일 태그 덮어쓰기가 AWS 정책상 차단됨.
 
-조치: ECR 리포지토리 설정에서 태그 변경 가능(Mutable)으로 전환하여 CI 파이프라인 정상화 완료.
+  * 조치: ECR 리포지토리 설정에서 태그 변경 가능(Mutable)으로 전환하여 CI 파이프라인 정상화 완료.
 
 
 ## 7. 주요 설계 의사결정
