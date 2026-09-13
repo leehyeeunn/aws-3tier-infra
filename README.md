@@ -8,7 +8,7 @@ FastAPI 백엔드 서비스의 외부 공격 표면(Attack Surface) 차단을 �
 
 ```text
 [Client / Internet]
-       │ (HTTP 80 -> HTTPS 443 Redirect)
+       │ (HTTP 80)
        ▼
 [Internet Gateway (IGW)]
        │
@@ -28,7 +28,9 @@ FastAPI 백엔드 서비스의 외부 공격 표면(Attack Surface) 차단을 �
 │            ▼                                                                  │
 │  [Private DB Subnets (Dedicated)]                                             │
 │    └─ RDS MySQL (Single-AZ Free-Tier)                                         │
-
+│                                                                               │
+│  [CloudWatch & SNS] ◄── 5XX Metrics Alarm (실시간 이메일 경보)                 │
+└───────────────────────────────────────────────────────────────────────────────┘
 ---
 
 ## 2. 주요 기술 스택
@@ -99,7 +101,7 @@ IaC(Terraform) 수명주기 실증: 콘솔로 구축했던 VPC, IGW, Public/Priv
 Teardown 원칙: 배포 검증 완료 후 유료 전환 가능성이 있는 ALB, RDS, EC2 인스턴스를 즉각 정지/회수하여 불필요한 클라우드 지출을 방지했습니다[cite: 1, 2].
 
 ## 6. 저장소 디렉터리 구조
-Plaintext
+
 ├── .github/
 │   └── workflows/
 │       └── deploy.yaml         * OIDC 기반 ECR 자동 빌드/푸시 CI 파이프라인
@@ -110,6 +112,4 @@ Plaintext
 ├── terraform/
 │   └── main.tf                 * VPC, IGW, 서브넷 프로비저닝 HCL 코드
 └── README.md                   * 인프라 아키텍처 및 트러블슈팅 문서
-│                                                                               │
-│  [CloudWatch & SNS] ◄── 5XX Metrics Alarm (실시간 이메일 경보)                 │
-└───────────────────────────────────────────────────────────────────────────────┘
+
