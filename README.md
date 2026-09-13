@@ -1,116 +1,462 @@
-# AWS 3-Tier 기반 보안 격리 인프라 구축 및 자동화 파이프라인
+# AWS 3-Tier 기반 보안 격리 인프라 구축 및 자동화
 
-FastAPI 백엔드 서비스의 외부 공격 표면(Attack Surface) 차단을 위해 Multi-AZ 3-Tier 네트워크를 설계하고, 보안 그룹 체이닝·모니터링 알람·Docker 컨테이너화 및 OIDC 기반 CI 자동화를 구축한 인프라 프로젝트입니다.
+AWS VPC 내부에 **ALB–Private EC2–RDS로 구성된 3-Tier 인프라**를 구축하고, 백엔드 서버를 인터넷에서 직접 접근할 수 없도록 격리한 프로젝트입니다.
+
+보안 그룹 참조 체이닝, Bastion Host 기반 관리 접근, CloudWatch 모니터링, Docker 컨테이너화, GitHub Actions OIDC 인증 및 Terraform을 적용하여 **네트워크 보안부터 배포 자동화까지의 인프라 구축 과정을 직접 경험하고 검증**했습니다.
 
 ---
 
-## 1. 아키텍처 개요
+## 1. 프로젝트 소개
+
+### 프로젝트 목표
+
+FastAPI 백엔드 서비스를 AWS 환경에 배포하면서 다음과 같은 인프라 구성을 직접 설계하고 구현했습니다.
+
+* 외부 요청과 애플리케이션 서버의 네트워크 분리
+* 인터넷에서 직접 접근할 수 없는 Private EC2 구성
+* ALB를 통한 애플리케이션 접근 경로 제한
+* 보안 그룹 참조를 활용한 계층별 접근 제어
+* 컨테이너 기반 애플리케이션 실행 환경 구성
+* 장기 AWS Access Key 없이 동작하는 CI 인증 방식 적용
+* CloudWatch와 SNS를 활용한 오류 모니터링
+* Terraform을 활용한 인프라 코드화
+
+### 프로젝트 핵심
+
+> **인터넷에 직접 노출되는 리소스를 최소화하고, 필요한 통신만 허용하는 AWS 인프라를 구축하는 것**을 핵심 목표로 삼았습니다.
+
+---
+
+## 2. 아키텍처
 
 ```text
-[Client / Internet]
-       │ (HTTP 80)
-       ▼
-[Internet Gateway (IGW)]
-       │
-┌──────┼────────────────────────────────────────────────────────────────────────┐
-│ VPC (10.0.0.0/16)                                                             │
-│      │                                                                        │
-│      ▼                                                                        │
-│  [Public Subnets (2a: 10.0.0.0/20, 2b: 10.0.16.0/20)]                         │
-│    ├─ Application Load Balancer (ALB) ──────────────────────────┐             │
-│    └─ Bastion Host (SSH 22: My IP Only)                         │             │
-│            │ (SSH ProxyJump 터널링)                             │             │
-│            ▼                                                    │             │
-│  [Private Subnets (2a: 10.0.128.0/20, 2b: 10.0.144.0/20)]       │             │
-│    └─ App Server (Docker: FastAPI Container) ◄──────────────────┘             │
-│            │                                    (alb-sg -> app-server-sg)     │
-│            │ (Port 3306)                                                      │
-│            ▼                                                                  │
-│  [Private DB Subnets (Dedicated)]                                             │
-│    └─ RDS MySQL (Single-AZ Free-Tier)                                         │
-│                                                                               │
-│  [CloudWatch & SNS] ◄── 5XX Metrics Alarm (실시간 이메일 경보)                 │
-└───────────────────────────────────────────────────────────────────────────────┘
+                         [Client / Internet]
+                                  │
+                                  │ HTTP :80
+                                  ▼
+                         [Internet Gateway]
+                                  │
+        ┌─────────────────────────VPC─────────────────────────┐
+        │                  10.0.0.0/16                         │
+        │                                                       │
+        │  ┌──────────── Public Subnets ────────────────┐      │
+        │  │                                             │      │
+        │  │       Application Load Balancer             │      │
+        │  │                    │                        │      │
+        │  │       Bastion Host │                        │      │
+        │  │          SSH :22    │                        │      │
+        │  └──────────────┬──────┼────────────────────────┘      │
+        │                 │      │                               │
+        │          SSH ProxyJump │                               │
+        │                 │      ▼                               │
+        │  ┌──────────────┴──── Private App Subnets ───────┐    │
+        │  │                                                 │    │
+        │  │          Private EC2 App Server                │    │
+        │  │          Docker / FastAPI :8000                │    │
+        │  │                    │                            │    │
+        │  └────────────────────┼────────────────────────────┘    │
+        │                       │                                 │
+        │                    TCP :3306                            │
+        │                       ▼                                 │
+        │  ┌────────────── Private DB Subnets ──────────────┐    │
+        │  │                                                 │    │
+        │  │                 RDS MySQL                       │    │
+        │  │              Single-AZ 구성                    │    │
+        │  └─────────────────────────────────────────────────┘    │
+        │                                                       │
+        │              CloudWatch → SNS                        │
+        │             5XX 오류 알림 → Email                    │
+        └───────────────────────────────────────────────────────┘
 ```
+
+### 네트워크 구성
+
+| 구분                 | 구성                                   |
+| ------------------ | ------------------------------------ |
+| VPC                | `10.0.0.0/16`                        |
+| Availability Zone  | `ap-northeast-2a`, `ap-northeast-2b` |
+| Public Subnet      | `10.0.0.0/20`, `10.0.16.0/20`        |
+| Private App Subnet | `10.0.128.0/20`, `10.0.144.0/20`     |
+| Public 리소스         | ALB, Bastion Host                    |
+| Private 리소스        | App Server EC2, RDS                  |
+| Database           | RDS MySQL Single-AZ                  |
+| 외부 접근 경로           | Internet → ALB → App Server          |
+| 관리자 접근 경로          | Local PC → Bastion → Private EC2     |
+
+> Public / Private 네트워크를 분리하고, 실제 애플리케이션과 데이터베이스는 인터넷에서 직접 접근할 수 없는 Private 영역에 배치했습니다.
+
 ---
 
-## 2. 주요 기술 스택
-- Cloud Infrastructure: AWS (VPC, Subnet, IGW, Route Table, EC2, ALB, RDS MySQL, CloudWatch, SNS, IAM, ECR)
+## 3. 주요 기술 스택
 
-- OS & Server: Ubuntu 24.04 LTS, Docker, Linux systemd 데몬
+### Cloud Infrastructure
 
-- Backend Runtime: Python 3.11, FastAPI, Uvicorn
+* AWS VPC
+* Subnet
+* Internet Gateway
+* Route Table
+* EC2
+* Application Load Balancer
+* RDS MySQL
+* CloudWatch
+* SNS
+* IAM
+* ECR
 
-- CI/CD & IaC: GitHub Actions, AWS OIDC Federation, Terraform
+### OS & Application
 
-## 3. 핵심 엔지니어링 의사결정 (How)
-### 1. 네트워크 격리 및 공격 표면 차단
-기본 VPC를 사용하지 않고 10.0.0.0/16 대역의 커스텀 VPC를 생성하여 2개 가용영역(2a, 2b)에 Public 서브넷과 Private 서브넷을 각각 4,096개(/20) 규모로 분할 배치했습니다.
+* Ubuntu 24.04 LTS
+* Linux
+* Docker
+* Python 3.11
+* FastAPI
+* Uvicorn
 
-외부 인터넷 통신이 필요한 ALB와 Bastion Host만 Public 서브넷에 전진 배치하고, 실제 비즈니스 로직(FastAPI)과 데이터베이스(RDS)는 아웃바운드 인터넷이 차단된 Private 서브넷에 격리했습니다.
+### CI/CD & IaC
 
-관리자 접근은 Bastion Host의 22번 포트 인바운드를 본인 공인 IP(My IP)로 한정하고, ProxyJump를 통한 터널링 세션으로만 Private EC2에 진입하도록 단일 진입로를 구성했습니다.
+* GitHub Actions
+* AWS OIDC Federation
+* Terraform
+* HCL
 
-### 2. 보안 그룹 체이닝 (Security Group Chaining)
-IP 대역 기반 규칙 설정을 배제하고 보안 그룹 ID 간의 참조 체이닝을 적용했습니다.
+---
 
-ALB SG: 외부 전세계(0.0.0.0/0) HTTP(80) / HTTPS(443) 허용
+## 4. 주요 구현 내용
 
-App EC2 SG: 소스를 alb-sg ID로 지정하여 8000번 포트만 인바운드 허용
+### 4.1 Public / Private 네트워크 분리
 
-RDS DB SG: 소스를 app-server-sg ID로 지정하여 3306번 포트만 인바운드 허용
+VPC를 직접 생성하고 2개의 Availability Zone에 Public 및 Private Subnet을 구성했습니다.
 
-외부에서 RDS 엔드포인트 직접 호출 시 타임아웃(TimedOut/False)으로 차단되고, Private EC2 내부에서만 nc -zv 명령어로 3306 포트 통신 성공(succeeded!)을 검증했습니다.
+인터넷과 통신이 필요한 리소스와 외부에서 직접 접근할 필요가 없는 리소스를 분리하여 네트워크 접근 범위를 제한했습니다.
 
-### 3. 애플리케이션 안정화 및 컨테이너 패키징
-1단계로 호스트 OS 내에서 systemd 서비스 데몬(Restart=always, RestartSec=5s)으로 FastAPI 프로세스를 관리하여 비정상 종료 시 즉각적인 자가 복구(Self-healing)를 보장했습니다.
+#### 구성
 
-2단계로 호스트 종속성을 제거하기 위해 경량 베이스 이미지(python:3.11-slim) 기반의 Dockerfile을 작성하여 컨테이너 런타임 환경을 표준화했습니다.
+* Public Subnet
 
-### 4. 보안 표준 준수 CI 자동화 (GitHub Actions & OIDC)
-보안 취약점인 장기 IAM Access Key 하드코딩을 배제하고, AWS IAM과 GitHub 간 OIDC(OpenID Connect) 연동을 구성했습니다.
+  * Application Load Balancer
+  * Bastion Host
 
-불변 주체 식별자(Immutable Subject Claims, sub: repo-id) 기반의 IAM 신뢰 정책(Trust Policy)을 적용하여 안전한 임시 보안 토큰(sts:AssumeRoleWithWebIdentity)으로 Amazon ECR 프라이빗 저장소에 도커 이미지를 자동 빌드·푸시하는 CI 파이프라인을 완성했습니다.
+* Private App Subnet
 
-## 4. 실제 트러블슈팅 및 장애 복구 (Deep Dive)
-[Issue 1] ALB 대상 그룹 상태 비정상 및 502 Bad Gateway 대응
-현상: ALB 엔드포인트 호출 시 브라우저에서 502 Bad Gateway가 출력되고 Target Group 헬스체크가 Unhealthy로 지속됨.
+  * FastAPI가 실행되는 EC2
 
-원인 추적: 백엔드 EC2 터미널 접속 후 curl localhost:8000/health는 정상 응답했으나, 프로세스 실행 바인드가 127.0.0.1:8000(Loopback)으로 설정되어 외부 네트워크 인터페이스(eth0)로 유입되는 ALB 헬스체크 트래픽을 리슨하지 못함.
+* Private DB Subnet
 
-해결: 바인딩 주소를 모든 인터페이스 수신을 뜻하는 0.0.0.0:8000으로 수정 후 재기동하여 즉각 Healthy 전환 및 200 OK 복구 확인.
+  * RDS MySQL
 
-[Issue 2] Private 서브넷 폐쇄망 환경의 패키지 통신 단절
-현상: Private EC2 내부에서 패키지 설치(apt update) 시 101: Network is unreachable 및 커넥션 타임아웃 발생.
+외부 요청은 ALB를 통해서만 애플리케이션 서버로 전달되도록 구성하고, EC2와 RDS는 인터넷에서 직접 접근할 수 없도록 배치했습니다.
 
-원인 추적: Private 라우팅 테이블에 Internet Gateway가 존재하지 않는 격리망 특성상 외부 패키지 저장소와의 아웃바운드 경로 부재.
+---
 
-해결 (FinOps 의사결정): 고정비(월 $32+)를 발생시키는 NAT Gateway를 무작정 증설하지 않고, Bastion Host에서 의존성 바이너리를 빌드/압축하여 사설망(SCP)으로 반입하는 오프라인 아티팩트 배포 방식을 적용하여 $0 비용으로 격리 배포 완료.
+### 4.2 보안 그룹 참조 체이닝
 
-[Issue 3] ECR 이미지 덮어쓰기 시 불변 태그 오류 차단
-현상: GitHub Actions 워크플로우 실행 중 The image tag 'latest' already exists and cannot be overwritten 에러로 파이프라인 중단.
+IP 대역을 직접 허용하는 방식 대신, **상위 계층의 보안 그룹을 다음 계층의 인바운드 소스로 지정**했습니다.
 
-원인 추적: ECR 리포지토리의 기본 옵션인 Tag Immutability(태그 불변성) 설정으로 인해 동일 태그(latest) 덮어쓰기가 AWS 정책상 차단됨.
+```text
+Internet
+   │
+   ▼
+ALB
+   │ alb-sg
+   ▼
+App Server
+   │ app-server-sg
+   ▼
+RDS
+   │
+   ▼
+rds-sg
+```
 
-해결: ECR 설정에서 태그 변경 가능(Mutable)으로 전환 후 재실행하여 빌드 및 태그 푸시 자동화 성공.
+#### 접근 제어
 
-## 5. 비용 최적화 (FinOps) 및 IaC 검증
-0원 인프라 통제: 월 고정비가 상시 발생하는 NAT Gateway를 배제하고, 프리티어 규격(t3.micro, db.t3.micro 8GB)만 통제 사용하여 AWS 청구 비용 $0.00을 유지했습니다.
+* ALB → App Server
 
-IaC(Terraform) 수명주기 실증: 콘솔로 구축했던 VPC, IGW, Public/Private 서브넷 구조를 main.tf HCL 코드로 선언하여 terraform plan 및 terraform apply를 통한 원클릭 인프라 프로비저닝을 검증하고, 검증 직후 terraform destroy로 잔여 리소스를 정리했습니다.
+  * `alb-sg`를 소스로 허용
 
-Teardown 원칙: 배포 검증 완료 후 유료 전환 가능성이 있는 ALB, RDS, EC2 인스턴스를 즉각 정지/회수하여 불필요한 클라우드 지출을 방지했습니다[cite: 1, 2].
+* App Server → RDS
 
-## 6. 저장소 디렉터리 구조
+  * `app-server-sg`를 소스로 허용
 
+* 외부 PC → RDS
+
+  * 직접 접근 차단
+
+이를 통해 특정 IP 대역 전체를 허용하기보다, **실제로 허가된 리소스 간 통신만 허용하는 방식**으로 접근 제어를 구성했습니다.
+
+---
+
+### 4.3 Bastion Host 기반 Private EC2 접근
+
+Private EC2에는 외부에서 직접 SSH 접속할 수 없도록 구성했습니다.
+
+관리자 접근이 필요한 경우 Public Subnet의 Bastion Host를 단일 진입점으로 사용했습니다.
+
+```text
+Local PC
+   │
+   │ SSH :22
+   ▼
+Bastion Host
+   │
+   │ SSH ProxyJump
+   ▼
+Private EC2
+```
+
+Bastion Host의 SSH 인바운드는 **관리자 공인 IP만 허용**하도록 제한했습니다.
+
+또한 Private EC2에 별도의 비밀키를 저장하지 않고, 로컬 OpenSSH의 `ProxyJump (-J)` 옵션을 활용해 Private 서버에 접근했습니다.
+
+---
+
+### 4.4 Private 환경에서의 배포 방식
+
+Private EC2에는 NAT Gateway를 연결하지 않아 외부 인터넷 저장소에 직접 접근할 수 없는 환경으로 구성했습니다.
+
+이로 인해 Private 서버에서 외부 패키지 저장소나 Docker Registry에 직접 접근하는 방식은 사용할 수 없었습니다.
+
+따라서 초기 배포 단계에서는 Bastion Host에서 필요한 파일과 패키지를 준비한 뒤, SCP를 통해 Private EC2로 전달하는 방식을 사용했습니다.
+
+```text
+Bastion Host
+   │
+   │ SCP
+   ▼
+Private EC2
+   │
+   ▼
+Docker Container 실행
+```
+
+#### 선택 이유
+
+NAT Gateway를 사용하면 Private Subnet에서도 외부 인터넷 접근이 가능하지만, 시간당 비용과 데이터 처리 비용이 발생합니다.
+
+이번 프로젝트에서는 학습 및 실습 환경의 비용을 고려하여 NAT Gateway를 사용하지 않는 대신, **사설망 내 파일 반입 방식으로 배포하는 구조를 선택했습니다.**
+
+---
+
+### 4.5 Docker 기반 FastAPI 실행
+
+FastAPI 애플리케이션을 Docker 이미지로 패키징하여 실행 환경의 종속성을 줄였습니다.
+
+#### 주요 구성
+
+* Python 3.11 기반 실행 환경
+* `requirements.txt`를 통한 의존성 관리
+* Dockerfile을 통한 이미지 빌드
+* Uvicorn을 활용한 FastAPI 실행
+* `0.0.0.0:8000` 바인딩
+
+컨테이너 내부에서 애플리케이션을 실행하고, ALB에서 전달된 요청을 App Server가 수신할 수 있도록 구성했습니다.
+
+---
+
+### 4.6 OIDC 기반 GitHub Actions CI 자동화
+
+GitHub Actions에서 AWS Access Key를 직접 저장하지 않고, **OIDC를 활용해 AWS IAM Role을 임시로 Assume하는 인증 방식**을 적용했습니다.
+
+```text
+GitHub Actions
+      │
+      │ OIDC Token
+      ▼
+AWS IAM OIDC Provider
+      │
+      │ AssumeRoleWithWebIdentity
+      ▼
+Temporary AWS Credentials
+      │
+      ▼
+Amazon ECR
+      │
+      ▼
+Docker Image Push
+```
+
+#### 적용 내용
+
+* GitHub Actions와 AWS IAM 간 OIDC 연동
+* IAM Trust Policy를 통한 저장소 접근 제한
+* 장기 Access Key 대신 임시 자격 증명 사용
+* Docker 이미지 빌드
+* Amazon ECR Private Repository로 이미지 Push
+
+이를 통해 저장소에 AWS Access Key를 저장하지 않고도 CI 파이프라인에서 AWS 리소스에 접근할 수 있도록 구성했습니다.
+
+---
+
+### 4.7 CloudWatch 및 SNS 모니터링
+
+애플리케이션의 오류 상황을 확인할 수 있도록 CloudWatch Alarm을 구성했습니다.
+
+```text
+Application Load Balancer
+          │
+          ▼
+CloudWatch Metrics
+          │
+          ▼
+5XX Error Alarm
+          │
+          ▼
+SNS
+          │
+          ▼
+Email Notification
+```
+
+5XX 오류 지표가 설정한 임계치를 초과하면 CloudWatch Alarm이 SNS Topic을 통해 이메일 알림을 전송하도록 구성했습니다.
+
+이를 통해 서비스 오류 발생 여부를 수동으로 확인하지 않고도 모니터링할 수 있도록 했습니다.
+
+---
+
+### 4.8 Terraform 기반 인프라 코드화
+
+수동으로 구성한 네트워크 리소스를 Terraform HCL 코드로 선언하여 인프라를 코드로 관리하는 과정을 경험했습니다.
+
+#### 관리 대상
+
+* VPC
+* Internet Gateway
+* Subnet
+* Route Table
+* 관련 네트워크 리소스
+
+Terraform을 활용해 다음 과정을 검증했습니다.
+
+```text
+Terraform Configuration
+          │
+          ▼
+terraform apply
+          │
+          ▼
+AWS Resources Created
+          │
+          ▼
+Infrastructure Verification
+          │
+          ▼
+terraform destroy
+          │
+          ▼
+Resources Removed
+```
+
+이를 통해 인프라 생성 및 삭제 과정을 코드 기반으로 재현할 수 있도록 구성했습니다.
+
+---
+
+## 5. 검증 결과
+
+구축한 인프라가 의도한 접근 제어와 통신 구조로 동작하는지 직접 확인했습니다.
+
+| 검증 항목                 | 검증 방법                       | 결과                 |
+| --------------------- | --------------------------- | ------------------ |
+| 외부 PC → RDS 직접 접근     | RDS Endpoint 직접 접속 시도       | 타임아웃 발생, 접근 차단 확인  |
+| Private EC2 → RDS     | `nc -zv` 명령어 사용             | 3306 포트 연결 성공      |
+| ALB → App Server      | ALB를 통한 서비스 요청              | 정상 응답 확인           |
+| Bastion → Private EC2 | SSH ProxyJump 접속            | Private 서버 접근 성공   |
+| GitHub Actions → ECR  | CI Workflow 실행              | Docker 이미지 Push 확인 |
+| CloudWatch → SNS      | 5XX Alarm 발생 조건 확인          | 이메일 알림 수신 확인       |
+| Terraform 리소스 관리      | `terraform apply / destroy` | 생성 및 자원 회수 과정 확인   |
+
+---
+
+## 6. 주요 설계 의사결정
+
+### NAT Gateway를 사용하지 않은 이유
+
+Private EC2에서 외부 인터넷 접근이 필요했지만, 실습 환경에서 NAT Gateway를 사용하면 지속적인 비용이 발생합니다.
+
+따라서 이번 프로젝트에서는 NAT Gateway를 추가하지 않고, Bastion Host를 통한 파일 전달 방식으로 배포했습니다.
+
+#### Trade-off
+
+* 장점
+
+  * NAT Gateway 비용 절감
+  * Private EC2의 외부 접근 경로 최소화
+
+* 단점
+
+  * 패키지 및 파일 반입 과정이 필요
+  * 완전한 자동 배포 환경으로 확장하기에는 추가 구성 필요
+
+---
+
+### 보안 그룹 ID 참조 방식을 사용한 이유
+
+CIDR 기반으로 넓은 IP 범위를 허용하는 방식보다, 보안 그룹을 소스로 지정하면 특정 계층의 리소스에서 발생하는 트래픽만 허용할 수 있습니다.
+
+따라서 다음과 같은 계층별 접근 구조를 구성했습니다.
+
+```text
+ALB SG → App Server SG → RDS SG
+```
+
+이를 통해 각 계층의 역할에 맞는 최소한의 네트워크 접근만 허용하도록 설계했습니다.
+
+---
+
+### OIDC 인증 방식을 사용한 이유
+
+GitHub Actions에서 AWS Access Key를 장기적으로 저장하는 방식은 자격 증명 유출 위험이 있습니다.
+
+OIDC를 사용하면 GitHub Actions가 실행될 때만 임시 자격 증명을 발급받을 수 있으므로, 장기 Access Key를 저장하지 않는 CI 인증 구조를 구성할 수 있습니다.
+
+---
+
+## 7. 프로젝트를 통해 경험한 내용
+
+* AWS VPC 및 Subnet 설계
+* Public / Private 네트워크 분리
+* ALB 기반 트래픽 전달 구조
+* EC2와 RDS 간 보안 그룹 참조
+* Bastion Host 및 SSH ProxyJump
+* Private Subnet 환경에서의 배포 방식
+* Docker 기반 애플리케이션 실행
+* GitHub Actions OIDC 인증
+* Amazon ECR 이미지 Push
+* CloudWatch Alarm 및 SNS 이메일 알림
+* Terraform을 활용한 인프라 코드화
+* 네트워크 접근 제어에 대한 연결성 검증
+
+---
+
+## 8. 저장소 디렉터리 구조
+
+```text
 ├── .github/
 │   └── workflows/
-│       └── deploy.yaml         * OIDC 기반 ECR 자동 빌드/푸시 CI 파이프라인
+│       └── deploy.yaml
+│           └── OIDC 기반 ECR 이미지 빌드 및 Push CI
+│
 ├── app/
-│   ├── main.py                 * FastAPI 백엔드 엔드포인트 (/health)
-│   ├── requirements.txt        * 종속성 패키지 명세
-│   └── Dockerfile              * 경량 Base Image 기반 컨테이너 규격서
+│   ├── main.py
+│   │   └── FastAPI 애플리케이션 엔드포인트 (/health)
+│   ├── requirements.txt
+│   │   └── Python 의존성 패키지
+│   └── Dockerfile
+│       └── FastAPI 실행 환경 및 이미지 설정
+│
 ├── terraform/
-│   └── main.tf                 * VPC, IGW, 서브넷 프로비저닝 HCL 코드
-└── README.md                   * 인프라 아키텍처 및 트러블슈팅 문서
+│   └── main.tf
+│       └── VPC, IGW, Subnet 등 인프라 리소스 정의
+│
+└── README.md
+    └── 프로젝트 아키텍처 및 구축 과정 문서
+```
 
+---
+
+## 9. 프로젝트 핵심 요약
+
+> **AWS VPC 내부에 Public / Private 네트워크를 분리하고, ALB–Private EC2–RDS 구조를 구성했습니다.**
+>
+> **보안 그룹 참조 체이닝과 Bastion Host를 통해 접근 경로를 제한하고, Docker·OIDC·CloudWatch·Terraform을 적용하여 컨테이너 실행, CI 인증, 모니터링, 인프라 코드화까지 경험했습니다.**
+
+---
