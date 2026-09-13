@@ -2,9 +2,8 @@
 
 AWS VPC 내부에 **ALB–Private EC2–RDS로 구성된 3-Tier 인프라**를 구축하고, 백엔드 서버를 인터넷에서 직접 접근할 수 없도록 격리한 프로젝트입니다.
 
-보안 그룹 참조 체이닝, Bastion Host 기반 관리 접근, CloudWatch 모니터링, Docker 컨테이너화, GitHub Actions OIDC 인증 및 Terraform을 적용하여 **네트워크 보안부터 배포 자동화까지의 인프라 구축 과정을 직접 경험하고 검증**했습니다.
+보안 그룹 참조 체이닝, Bastion Host 기반 관리 접근, CloudWatch 모니터링, Docker 컨테이너화, GitHub Actions OIDC 인증 및 Terraform을 적용하여 **네트워크 보안부터 GitHub Actions + OIDC 기반의 ECR 자동 빌드/푸시(CI)까지의 인프라 구축 과정을 직접 경험하고 검증**했습니다.
 
----
 
 ## 1. 프로젝트 소개
 
@@ -25,48 +24,10 @@ FastAPI 백엔드 서비스를 AWS 환경에 배포하면서 다음과 같은 �
 
 > **인터넷에 직접 노출되는 리소스를 최소화하고, 필요한 통신만 허용하는 AWS 인프라를 구축하는 것**을 핵심 목표로 삼았습니다.
 
----
 
 ## 2. 아키텍처
+<img width="1024" height="559" alt="image" src="https://github.com/user-attachments/assets/bc797dcf-2f7c-44a0-81a5-a72548f03ada" />
 
-```text
-                         [Client / Internet]
-                                  │
-                                  │ HTTP :80
-                                  ▼
-                         [Internet Gateway]
-                                  │
-        ┌─────────────────────────VPC─────────────────────────┐
-        │                  10.0.0.0/16                         │
-        │                                                       │
-        │  ┌──────────── Public Subnets ────────────────┐      │
-        │  │                                             │      │
-        │  │       Application Load Balancer             │      │
-        │  │                    │                        │      │
-        │  │       Bastion Host │                        │      │
-        │  │          SSH :22    │                        │      │
-        │  └──────────────┬──────┼────────────────────────┘      │
-        │                 │      │                               │
-        │          SSH ProxyJump │                               │
-        │                 │      ▼                               │
-        │  ┌──────────────┴──── Private App Subnets ───────┐    │
-        │  │                                                 │    │
-        │  │          Private EC2 App Server                │    │
-        │  │          Docker / FastAPI :8000                │    │
-        │  │                    │                            │    │
-        │  └────────────────────┼────────────────────────────┘    │
-        │                       │                                 │
-        │                    TCP :3306                            │
-        │                       ▼                                 │
-        │  ┌────────────── Private DB Subnets ──────────────┐    │
-        │  │                                                 │    │
-        │  │                 RDS MySQL                       │    │
-        │  │              Single-AZ 구성                    │    │
-        │  └─────────────────────────────────────────────────┘    │
-        │                                                       │
-        │              CloudWatch → SNS                        │
-        │             5XX 오류 알림 → Email                    │
-        └───────────────────────────────────────────────────────┘
 ```
 
 ### 네트워크 구성
@@ -85,7 +46,6 @@ FastAPI 백엔드 서비스를 AWS 환경에 배포하면서 다음과 같은 �
 
 > Public / Private 네트워크를 분리하고, 실제 애플리케이션과 데이터베이스는 인터넷에서 직접 접근할 수 없는 Private 영역에 배치했습니다.
 
----
 
 ## 3. 주요 기술 스택
 
@@ -119,7 +79,6 @@ FastAPI 백엔드 서비스를 AWS 환경에 배포하면서 다음과 같은 �
 * Terraform
 * HCL
 
----
 
 ## 4. 주요 구현 내용
 
@@ -146,7 +105,6 @@ VPC를 직접 생성하고 2개의 Availability Zone에 Public 및 Private Subne
 
 외부 요청은 ALB를 통해서만 애플리케이션 서버로 전달되도록 구성하고, EC2와 RDS는 인터넷에서 직접 접근할 수 없도록 배치했습니다.
 
----
 
 ### 4.2 보안 그룹 참조 체이닝
 
@@ -184,7 +142,6 @@ rds-sg
 
 이를 통해 특정 IP 대역 전체를 허용하기보다, **실제로 허가된 리소스 간 통신만 허용하는 방식**으로 접근 제어를 구성했습니다.
 
----
 
 ### 4.3 Bastion Host 기반 Private EC2 접근
 
@@ -208,7 +165,6 @@ Bastion Host의 SSH 인바운드는 **관리자 공인 IP만 허용**하도록 �
 
 또한 Private EC2에 별도의 비밀키를 저장하지 않고, 로컬 OpenSSH의 `ProxyJump (-J)` 옵션을 활용해 Private 서버에 접근했습니다.
 
----
 
 ### 4.4 Private 환경에서의 배포 방식
 
@@ -235,7 +191,6 @@ NAT Gateway를 사용하면 Private Subnet에서도 외부 인터넷 접근이 �
 
 이번 프로젝트에서는 학습 및 실습 환경의 비용을 고려하여 NAT Gateway를 사용하지 않는 대신, **사설망 내 파일 반입 방식으로 배포하는 구조를 선택했습니다.**
 
----
 
 ### 4.5 Docker 기반 FastAPI 실행
 
@@ -251,7 +206,6 @@ FastAPI 애플리케이션을 Docker 이미지로 패키징하여 실행 환경�
 
 컨테이너 내부에서 애플리케이션을 실행하고, ALB에서 전달된 요청을 App Server가 수신할 수 있도록 구성했습니다.
 
----
 
 ### 4.6 OIDC 기반 GitHub Actions CI 자동화
 
@@ -285,7 +239,6 @@ Docker Image Push
 
 이를 통해 저장소에 AWS Access Key를 저장하지 않고도 CI 파이프라인에서 AWS 리소스에 접근할 수 있도록 구성했습니다.
 
----
 
 ### 4.7 CloudWatch 및 SNS 모니터링
 
@@ -311,7 +264,6 @@ Email Notification
 
 이를 통해 서비스 오류 발생 여부를 수동으로 확인하지 않고도 모니터링할 수 있도록 했습니다.
 
----
 
 ### 4.8 Terraform 기반 인프라 코드화
 
@@ -321,9 +273,7 @@ Email Notification
 
 * VPC
 * Internet Gateway
-* Subnet
-* Route Table
-* 관련 네트워크 리소스
+* Public, Private Subnet
 
 Terraform을 활용해 다음 과정을 검증했습니다.
 
@@ -348,7 +298,6 @@ Resources Removed
 
 이를 통해 인프라 생성 및 삭제 과정을 코드 기반으로 재현할 수 있도록 구성했습니다.
 
----
 
 ## 5. 검증 결과
 
@@ -364,9 +313,31 @@ Resources Removed
 | CloudWatch → SNS      | 5XX Alarm 발생 조건 확인          | 이메일 알림 수신 확인       |
 | Terraform 리소스 관리      | `terraform apply / destroy` | 생성 및 자원 회수 과정 확인   |
 
----
 
-## 6. 주요 설계 의사결정
+## 6. 트러블슈팅 및 장애 복구 (Troubleshooting)
+* [Issue 1] ALB 대상 그룹 502 Bad Gateway 및 Unhealthy 해결
+현상: ALB 엔드포인트 호출 시 브라우저에서 502 Bad Gateway가 반환되고 대상 그룹 헬스체크가 지속적으로 Unhealthy로 표시됨.
+
+원인: 백엔드 프로세스가 루프백 인터페이스(127.0.0.1:8000)로 바인딩되어 외부 가상 네트워크 카드(eth0)를 통해 들어오는 ALB 트래픽을 거부함.
+
+조치: 실행 호스트 주소를 모든 네트워크 인터페이스 수신을 뜻하는 0.0.0.0:8000으로 변경 후 재기동하여 Healthy 전환 및 정상 200 OK 복구 완료.
+
+* [Issue 2] Private Subnet 내부 패키지 타임아웃 대응 (FinOps)
+현상: Private EC2 내부에서 apt update 실행 시 101: Network is unreachable 및 연결 타임아웃 발생.
+
+원인: 격리망 특성상 외부 인터넷으로 나가는 라우팅 경로 부재.
+
+조치: 고정비가 큰 NAT Gateway를 증설하는 대신, Bastion Host에서 아티팩트를 패키징하여 사설 SCP로 반입하는 오프라인 아티팩트 배포 방식을 적용하여 $0 비용으로 격리 배포 완료.
+
+* [Issue 3] ECR 이미지 덮어쓰기 차단 오류
+현상: GitHub Actions 워크플로우 실행 중 The image tag 'latest' already exists and cannot be overwritten 에러로 파이프라인 중단.
+
+원인: ECR 리포지토리의 기본 옵션인 Tag Immutability(태그 불변성) 설정으로 동일 태그 덮어쓰기가 AWS 정책상 차단됨.
+
+조치: ECR 리포지토리 설정에서 태그 변경 가능(Mutable)으로 전환하여 CI 파이프라인 정상화 완료.
+
+
+## 7. 주요 설계 의사결정
 
 ### NAT Gateway를 사용하지 않은 이유
 
@@ -386,7 +357,6 @@ Private EC2에서 외부 인터넷 접근이 필요했지만, 실습 환경에�
   * 패키지 및 파일 반입 과정이 필요
   * 완전한 자동 배포 환경으로 확장하기에는 추가 구성 필요
 
----
 
 ### 보안 그룹 ID 참조 방식을 사용한 이유
 
@@ -400,7 +370,6 @@ ALB SG → App Server SG → RDS SG
 
 이를 통해 각 계층의 역할에 맞는 최소한의 네트워크 접근만 허용하도록 설계했습니다.
 
----
 
 ### OIDC 인증 방식을 사용한 이유
 
@@ -408,9 +377,8 @@ GitHub Actions에서 AWS Access Key를 장기적으로 저장하는 방식은 �
 
 OIDC를 사용하면 GitHub Actions가 실행될 때만 임시 자격 증명을 발급받을 수 있으므로, 장기 Access Key를 저장하지 않는 CI 인증 구조를 구성할 수 있습니다.
 
----
 
-## 7. 프로젝트를 통해 경험한 내용
+## 8. 프로젝트를 통해 경험한 내용
 
 * AWS VPC 및 Subnet 설계
 * Public / Private 네트워크 분리
@@ -425,9 +393,8 @@ OIDC를 사용하면 GitHub Actions가 실행될 때만 임시 자격 증명을 
 * Terraform을 활용한 인프라 코드화
 * 네트워크 접근 제어에 대한 연결성 검증
 
----
 
-## 8. 저장소 디렉터리 구조
+## 9. 저장소 디렉터리 구조
 
 ```text
 ├── .github/
@@ -451,12 +418,10 @@ OIDC를 사용하면 GitHub Actions가 실행될 때만 임시 자격 증명을 
     └── 프로젝트 아키텍처 및 구축 과정 문서
 ```
 
----
 
-## 9. 프로젝트 핵심 요약
+## 10. 프로젝트 핵심 요약
 
 > **AWS VPC 내부에 Public / Private 네트워크를 분리하고, ALB–Private EC2–RDS 구조를 구성했습니다.**
 >
 > **보안 그룹 참조 체이닝과 Bastion Host를 통해 접근 경로를 제한하고, Docker·OIDC·CloudWatch·Terraform을 적용하여 컨테이너 실행, CI 인증, 모니터링, 인프라 코드화까지 경험했습니다.**
 
----
